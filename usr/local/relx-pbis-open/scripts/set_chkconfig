@@ -1,0 +1,3 @@
+#!/bin/bash
+/sbin/chkconfig relx-pbis-wrapper on
+at now + 1 minute -f /usr/local/relx-pbis-open/bin/relx-pbis-open-configure

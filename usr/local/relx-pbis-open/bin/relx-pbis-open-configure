@@ -1,0 +1,196 @@
+#!/bin/bash
+#Author: Tony Vinson (vinsontx@lexisnexis.com)
+#Edited on 17 March 2017
+#update-rc.d : 345 99 10
+# description: start and configure PBIS for newlexis domain
+#
+service=lwsmd
+domain=newlexis.net
+domain_nb=NEWLEXIS
+dom_user=ln-svc-DomJoiner
+dom_pass=\!\!J10ner
+dom_join_log=/usr/local/relx-pbis-open/tmp/domain_join.log
+shell=/bin/bash
+assume_domain=true
+cloud=`/usr/bin/ec2metadata | grep public-keys | cut -d " " -f4 |cut -d "'" -f1`
+lifecycle=`echo $cloud |cut -d - -f3` 
+#lifecycle=`/usr/bin/ec2metadata | grep public-keys | cut -d " " -f4 |cut -d - -f3 |cut -d "'" -f1`
+#cloud=`/usr/bin/ec2metadata | grep keyname | cut -d : -f2`
+#lifecycle=`/usr/bin/ec2metadata | grep keyname | cut -d : -f2 |cut -d - -f3`
+ou=Servers/LNG/NewLexis/$lifecycle
+sudo_template=/usr/local/relx-pbis-open/share/domain_admin
+package1="/usr/local/relx-pbis-open/share/pbis-open_8.5.3.293_amd64.deb"
+package2="/usr/local/relx-pbis-open/share/pbis-open-upgrade_8.5.3.293_amd64.deb"
+pkg1=pbis-open
+
+# Make sure that PBIS is installed
+problem=$(dpkg -s $pkg1|grep installed)
+echo Checking for $pkg1: $problem
+if [ "" == "$problem" ]; then
+     echo "No $pkg1. Setting up $pkg1" >> $dom_join_log
+     sudo apt-get --yes install $package2 $package1 >> $dom_join_log
+else
+echo "`date -u ` pbis-open already installed" > $dom_join_log
+
+fi
+
+
+# Ensure that the PBIS Service is running
+if (( $(ps -ef | grep -v grep | grep $service | wc -l) > 0 ))
+then
+echo "`date -u ` PBIS is running!!!" >> $dom_join_log
+else
+echo "`date -u ` Starting PBIS !!!" >> $dom_join_log
+systemctl start $service 
+
+#Enable this script for boot time
+update-rc.d relx-pbis-wrapper defaults
+update-rc.d relx-pbis-wrapper 20 3 4 5
+
+fi
+
+#Update DNS
+echo "`date -u ` Updating DNS record" >> $dom_join_log;
+/opt/pbis/bin/update-dns  --nocreds --fqdn `hostname`.$domain >> $dom_join_log;
+#Run the line below to debug
+#/opt/pbis/bin/update-dns --loglevel debug >> $dom_join_log;
+
+# Join the domain if not joined exit if joined
+shell_conf=`/opt/pbis/bin/config --show LoginShellTemplate | grep bash`
+domain_conf=`/opt/pbis/bin/config --show UserDomainPrefix | grep newlexis.net`
+login_domain_conf= `/opt/pbis/bin/config --show AssumeDefaultDomain | grep true`
+joined=`domainjoin-cli query | grep Domain | cut -d ' ' -f3`
+
+if [[ $(fgrep -ix $domain <<< $joined) ]]; then
+    echo "`date -u ` This host is already joined to $domain" >> $dom_join_log;
+else
+domainjoin-cli  --logfile $dom_join_log --loglevel verbose join  --disable hostname --ou $ou $domain $dom_user $dom_pass
+fi
+
+#Verify Domin Join
+joined=`domainjoin-cli query | grep Domain | cut -d ' ' -f3`
+if [[ $(fgrep -ix $domain <<< $joined) ]]; then
+    echo "`date -u ` This host has successfully joined $domain" >> $dom_join_log;
+else
+echo "`date -u ` Domain join failed check log $dom_join_log" >> $dom_join_log
+exit 1; 
+fi
+
+#Update DNS
+echo "`date -u ` Updating DNS record" >> $dom_join_log;
+/opt/pbis/bin/update-dns >> $dom_join_log;
+#Run the line below to debug
+#/opt/pbis/bin/update-dns --loglevel debug >> $dom_join_log;
+
+# Set default user shell to bash
+#if [[ $(fgrep -ix $shell_conf <<< $shell) ]]; then
+  if [ "$shell_conf" == "$shell" ]; then
+  echo "`date -u ` User shell is already set to $shell" >> $dom_join_log;
+  else   
+  echo "`date -u ` Setting Default User shell to $shell" >> $dom_join_log
+  /opt/pbis/bin/config LoginShellTemplate $shell
+  fi 
+
+# Set user login Domain Prefix
+#if [[ $(fgrep -ix $domain_conf <<< $domain) ]]; then
+  if [ "$domain_conf" == "$domain" ]; then
+   echo "`date -u ` Default user domain is already set to $domain" >> $dom_join_log;
+  else
+  echo "`date -u ` Setting Default User domain to $domain" >> $dom_join_log
+  /opt/pbis/bin/config UserDomainPrefix $domain
+  fi
+
+# Set Assume default domain to true
+#if [[ $(fgrep -ix $login_domain_conf <<< $assume_domain) ]]; then
+  if [ "$login_domain_conf" == "$assume_domain" ]; then
+   echo "`date -u ` Assume default domain is already set to $assume_domain" >> $dom_join_log;
+  else
+  echo "`date -u ` Setting assume default domain to $assume_domain" >> $dom_join_log
+  /opt/pbis/bin/config AssumeDefaultDomain $assume_domain
+  fi
+
+# Setup Login and sudo access based on group membership
+echo "`date -u` Setting up group based login and Sudo access for host using key $cloud" >> $dom_join_log;
+#Backup sudoers ${cloud}_admin if it exists
+if [ -f /etc/sudoers.d/${cloud}_admin ]; then
+  cp  /etc/sudoers.d/${cloud}_admin  /etc/sudoers.d/${cloud}_admin.bak
+  echo "`date -u ` Backing up existing /etc/sudoers.d/${cloud}_admin to /etc/sudoers.d/${cloud}_admin.bak" >> $dom_join_log
+fi  
+
+cp  $sudo_template  /etc/sudoers.d/${cloud}_admin
+
+case "$cloud" in 
+
+product-nl-dev) 
+  ad_group1=LN-NewLexis-Dev-L1
+  ad_group2=LN-NewLexis-Dev-L2
+/opt/pbis/bin/config RequireMembershipOf  $domain\\domain^admins $domain\\$ad_group1 $domain\\$ad_group2
+#echo "%$domain_nb\\\\$ad_group1 ALL=(ALL"\:"ALL) ALL" >>  /etc/sudoers.d/${cloud}_admin
+echo "%$domain_nb\\\\$ad_group2 ALL=(ALL"\:"ALL) ALL" >>  /etc/sudoers.d/${cloud}_admin
+;;
+
+product-nl-cert)
+  ad_group1=LN-NewLexis-Cert-L1
+  ad_group2=LN-NewLexis-Cert-L2
+/opt/pbis/bin/config RequireMembershipOf  $domain\\domain^admins $domain\\$ad_group1 $domain\\$ad_group2
+#echo "%$domain_nb\\\\$ad_group1 ALL=(ALL"\:"ALL) ALL" >>  /etc/sudoers.d/${cloud}_admin
+echo "%$domain_nb\\\\$ad_group2 ALL=(ALL"\:"ALL) ALL" >>  /etc/sudoers.d/${cloud}_admin
+;;
+
+product-nl-prod)
+  ad_group1=LN-NewLexis-Prod-L1
+  ad_group2=LN-NewLexis-Prod-L2
+/opt/pbis/bin/config RequireMembershipOf  $domain\\domain^admins $domain\\$ad_group1 $domain\\$ad_group2
+#echo "%$domain_nb\\\\$ad_group1 ALL=(ALL"\:"ALL) ALL" >>  /etc/sudoers.d/${cloud}_admin
+echo "%$domain_nb\\\\$ad_group2 ALL=(ALL"\:"ALL) ALL" >>  /etc/sudoers.d/${cloud}_admin
+;;
+
+operations-nl-dev)
+  ad_group1=LN-NewLexis-Dev-L1
+  ad_group2=LN-NewLexis-Dev-L2
+/opt/pbis/bin/config RequireMembershipOf  $domain\\domain^admins $domain\\$ad_group1 $domain\\$ad_group2
+#echo "%$domain_nb\\\\$ad_group1 ALL=(ALL"\:"ALL) ALL" >>  /etc/sudoers.d/${cloud}_admin
+echo "%$domain_nb\\\\$ad_group2 ALL=(ALL"\:"ALL) ALL" >>  /etc/sudoers.d/${cloud}_admin
+;;
+
+operations-nl-cert)
+  ad_group1=LN-NewLexis-Cert-L1
+  ad_group2=LN-NewLexis-Cert-L2
+/opt/pbis/bin/config RequireMembershipOf  $domain\\domain^admins $domain\\$ad_group1 $domain\\$ad_group2
+#echo "%$domain_nb\\\\$ad_group1 ALL=(ALL"\:"ALL) ALL" >>  /etc/sudoers.d/${cloud}_admin
+echo "%$domain_nb\\\\$ad_group2 ALL=(ALL"\:"ALL) ALL" >>  /etc/sudoers.d/${cloud}_admin
+;;
+
+operations-nl-prod)
+  ad_group1=LN-NewLexis-Prod-L1
+  ad_group2=LN-NewLexis-Prod-L2
+/opt/pbis/bin/config RequireMembershipOf  $domain\\domain^admins $domain\\$ad_group1 $domain\\$ad_group2
+#echo "%$domain_nb\\\\$ad_group1 ALL=(ALL"\:"ALL) ALL" >>  /etc/sudoers.d/${cloud}_admin
+echo "%$domain_nb\\\\$ad_group2 ALL=(ALL"\:"ALL) ALL" >>  /etc/sudoers.d/${cloud}_admin
+;;
+
+monitoring-nl-dev)
+  ad_group1=LN-NewLexis-Dev-L1
+  ad_group2=LN-NewLexis-Dev-L2
+/opt/pbis/bin/config RequireMembershipOf  $domain\\domain^admins $domain\\$ad_group1 $domain\\$ad_group2
+#echo "%$domain_nb\\\\$ad_group1 ALL=(ALL"\:"ALL) ALL" >>  /etc/sudoers.d/${cloud}_admin
+echo "%$domain_nb\\\\$ad_group2 ALL=(ALL"\:"ALL) ALL" >>  /etc/sudoers.d/${cloud}_admin
+;;
+
+monitoring-nl-cert)
+  ad_group1=LN-NewLexis-Cert-L1
+  ad_group2=LN-NewLexis-Cert-L2
+/opt/pbis/bin/config RequireMembershipOf  $domain\\domain^admins $domain\\$ad_group1 $domain\\$ad_group2
+#echo "%$domain_nb\\\\$ad_group1 ALL=(ALL"\:"ALL) ALL" >>  /etc/sudoers.d/${cloud}_admin
+echo "%$domain_nb\\\\$ad_group2 ALL=(ALL"\:"ALL) ALL" >>  /etc/sudoers.d/${cloud}_admin
+;;
+
+monitoring-nl-prod)
+  ad_group1=LN-NewLexis-Prod-L1
+  ad_group2=LN-NewLexis-Prod-L2
+/opt/pbis/bin/config RequireMembershipOf  $domain\\domain^admins $domain\\$ad_group1 $domain\\$ad_group2
+#echo "%$domain_nb\\\\$ad_group1 ALL=(ALL"\:"ALL) ALL" >>  /etc/sudoers.d/${cloud}_admin
+echo "%$domain_nb\\\\$ad_group2 ALL=(ALL"\:"ALL) ALL" >>  /etc/sudoers.d/${cloud}_admin
+;;
+#/opt/pbis/bin/config RequireMembershipOf  $domain\\domain^admins $domain\\$ad_group1 $domain\\$ad_group2
+esac
