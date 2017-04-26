@@ -24,6 +24,9 @@ sudo_template=/usr/local/relx-pbis-open/share/domain_admin
 package1="/usr/local/relx-pbis-open/share/pbis-open_8.5.3.293_amd64.deb"
 package2="/usr/local/relx-pbis-open/share/pbis-open-upgrade_8.5.3.293_amd64.deb"
 pkg1=pbis-open
+auth_keys="/home/ec2-user/.ssh/authorized_keys"
+ssm_pkg=amazon-ssm-agent
+ssm_package="/usr/local/relx-pbis-open/share/amazon-ssm-agent.deb"
 
 # Make sure that PBIS is installed
 problem=$(dpkg -s $pkg1|grep installed)
@@ -202,3 +205,47 @@ esac
    systemctl stop lwsmd
   ;;
 esac
+#Verify Domain Join again
+joined=`domainjoin-cli query | grep Domain | cut -d ' ' -f3`
+if [[ $(fgrep -ix $domain <<< $joined) ]]; then
+
+    # Make sure that upstart is installed
+    #problem3=$(dpkg -s upstart|grep installed)
+    #echo Checking for upstart: $problem3
+    #if [ "" == "$problem3" ]; then
+    #     echo "No upstart. Setting up upstart" >> $dom_join_log
+    #     apt-get --yes install upstart
+    #else
+    #echo "`date -u ` $ssm_pkg already installed" > $dom_join_log
+    #fi
+
+    # Make sure that SSM is installed
+    problem4=$(dpkg -s $ssm_pkg|grep installed)
+    echo Checking for $ssm_pkg: $problem4
+    if [ "" == "$problem4" ]; then
+         echo "No $ssm_pkg. Setting up $ssm_pkg" >> $dom_join_log
+         cd /tmp
+         apt-get --yes install $ssm_package
+         systemctl start amazon-ssm-agent
+#         update-rc.d $ssm_pkg defaults
+#         update-rc.d $ssm_pkg 20 3 4 5
+    else
+    echo "`date -u ` $ssm_pkg already installed" > $dom_join_log
+
+    fi
+        # Ensure that the SSM Service is running
+    if (( $( systemctl status $ssm_pkg | grep running| wc -l) > 0 ))
+    then
+    echo "`date -u ` $ssm_pkg is running!!!" >> $dom_join_log
+    else
+    echo "`date -u ` Starting $ssm_pkg !!!" >> $dom_join_log
+    systemctl start $ssm_pkg
+    fi
+    # Remove Authkeys File if SSM is Running
+    if (( $( systemctl status $ssm_pkg | grep running| wc -l) > 0 ))
+    then
+    rm -f $auth_keys
+    echo "`date -u ` $auth_keys removed" >> $dom_join_log
+    fi
+fi
+
